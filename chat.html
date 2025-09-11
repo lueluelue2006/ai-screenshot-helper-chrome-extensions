@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>截图问AI · 对话</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: #0b1220; color: #e5e7eb; }
+      .container { height: 100vh; display: flex; flex-direction: column; }
+      .header { height: 48px; display: flex; align-items: center; padding: 0 12px; background: #111827; border-bottom: 1px solid #374151; }
+      .title { font-size: 14px; color: #d1d5db; }
+      .spacer { flex: 1; }
+      .btn { border: 1px solid #374151; background: #1f2937; color: #e5e7eb; padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+      .btn.primary { border-color: #4f46e5; background: #4f46e5; color: #fff; }
+      .body { flex: 1 1 auto; overflow: auto; padding: 12px; }
+      .footer { border-top: 1px solid #374151; padding: 10px 12px; background: #111827; display: flex; gap: 8px; }
+      .input-wrap { flex: 1; display: flex; }
+      textarea { flex: 1; resize: vertical; min-height: 60px; max-height: 200px; border-radius: 10px; border: 1px solid #374151; background: #0b1220; color: #e5e7eb; padding: 8px 10px; font-size: 14px; line-height: 1.5; }
+      .msg { margin: 8px 0; padding: 10px 12px; border-radius: 12px; border: 1px solid #243047; max-width: 960px; }
+      .msg.user { background: #0b1220; color: #cbd5e1; margin-left: auto; }
+      .msg.assistant { background: #111827; color: #e5e7eb; }
+      .msg .role { font-size: 12px; color: #9ca3af; margin-bottom: 4px; }
+      .attach-info { align-self: center; font-size: 12px; color: #9ca3af; min-width: 110px; text-align: right; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="title">截图问AI · 对话</div>
+        <div class="spacer"></div>
+        <button id="copyBtn" class="btn">复制全部</button>
+        <button id="clearBtn" class="btn">清空</button>
+      </div>
+      <div id="chatBody" class="body"></div>
+      <div class="footer">
+        <div class="input-wrap"><textarea id="input" placeholder="输入内容…（Enter 发送，Shift+Enter 换行；支持粘贴/拖入图片）"></textarea></div>
+        <span id="attachInfo" class="attach-info"></span>
+        <button id="attachBtn" class="btn">添加图片</button>
+        <button id="sendBtn" class="btn primary">发送</button>
+      </div>
+    </div>
+    <script src="chat.js"></script>
+  </body>
+  </html>
