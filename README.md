@@ -1,0 +1,1 @@
+截图询问多模态AI，只接入了openai的chat completions和responses接口
