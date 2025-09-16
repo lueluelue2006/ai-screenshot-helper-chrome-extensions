@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "截图问AI",
   "description": "使用快捷键选区截图并发送给AI解题，支持自定义接口与提示词。",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "action": {
     "default_title": "截图问AI",
     "default_popup": "popup.html"
