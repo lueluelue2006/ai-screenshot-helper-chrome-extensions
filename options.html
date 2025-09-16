@@ -15,6 +15,7 @@
       .actions { display: flex; gap: 12px; justify-content: flex-end; }
       button { padding: 8px 12px; border-radius: 8px; border: 1px solid #d1d5db; background: #111827; color: #fff; cursor: pointer; }
       button.secondary { background: #fff; color: #111; }
+      button.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
       small { color: #6b7280; }
     </style>
   </head>
@@ -25,13 +26,14 @@
       <h2>接口设置</h2>
       <div class="row">
         <div>
-          <label for="apiMode">接口类型</label>
-          <select id="apiMode">
-            <option value="completions">/v1/chat/completions</option>
-            <option value="responses">/v1/responses</option>
+          <label for="apiPreset">接口预设</label>
+          <select id="apiPreset">
+            <option value="google">Google（Google AI Studio）</option>
+            <option value="openaiChat">OpenAI Chat Completions</option>
+            <option value="openaiResponses">OpenAI Responses</option>
+            <option value="custom">自定义 API</option>
           </select>
         </div>
-        <div></div>
       </div>
       <div class="row">
         <div>
@@ -39,13 +41,17 @@
           <input id="apiBaseUrl" type="text" placeholder="https://api.openai.com" />
         </div>
         <div>
-          <label for="apiPath">API Path <small>(随接口类型调整)</small></label>
+          <label for="apiPath">API Path <small>(默认按预设填写)</small></label>
           <input id="apiPath" type="text" placeholder="/v1/chat/completions" />
         </div>
       </div>
       <div>
         <label for="apiKey">API Key</label>
-        <input id="apiKey" type="password" placeholder="sk-..." />
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="apiKey" type="password" placeholder="sk-..." style="flex:1;" />
+          <button id="googleKeyBtn" class="secondary" style="display:none; white-space:nowrap;">获取 Google Key</button>
+        </div>
+        <small id="googleKeyHelp" style="display:none; color:#6b7280;">1. 点击右上角 “创建 API 秘钥”。2. 在新项目中创建 API 秘钥。</small>
       </div>
     </div>
 
@@ -53,14 +59,15 @@
       <h2>模型与推理</h2>
       <div class="row">
         <div>
-          <label for="model">Model</label>
-          <input id="model" type="text" placeholder="o4-mini" />
+          <label for="modelSelect">Model</label>
+          <select id="modelSelect" style="display:none; width:100%;"></select>
+          <input id="modelInput" type="text" placeholder="o4-mini" />
         </div>
         <div>
           <label for="reasoningEffort">Reasoning Effort</label>
           <select id="reasoningEffort">
             <option value="none">none（不传该参数）</option>
-            <option value="minimal">minimal</option>
+            <option value="minimal">minimal（仅 GPT-5 支持）</option>
             <option value="low">low</option>
             <option value="medium" selected>medium</option>
             <option value="high">high</option>
@@ -79,12 +86,15 @@
           </div>
         </div>
         <div>
-          <label for="maxTokens">最大输出 Tokens <small>(默认65536，不启用则不传)</small></label>
+          <label for="maxTokens">最大输出 Tokens <small>(默认不启用；开启后默认值为 65536)</small></label>
           <div style="display:flex; gap:8px; align-items:center;">
             <input type="checkbox" id="useMaxTokens" />
             <input id="maxTokens" type="number" step="1" min="1" placeholder="65536" style="flex:1" />
           </div>
         </div>
+      </div>
+      <div style="margin-top:12px; text-align:right;">
+        <button id="testChannel" class="secondary">测试渠道</button>
       </div>
     </div>
 
@@ -101,8 +111,8 @@
     </div>
 
     <div class="actions">
-      <button id="save">保存</button>
-      <button id="reset" class="secondary">恢复默认</button>
+      <button id="reset" class="secondary">恢复当前渠道默认</button>
+      <button id="resetAll" class="danger">重置所有设置</button>
     </div>
 
     <script src="options.js"></script>

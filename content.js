@@ -1,6 +1,11 @@
 // content.js – selection overlay + multi-session in-page chat panel
 
-(function () {
+if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
+  // Already injected on this page; avoid re-running to prevent duplicate panels/handlers.
+} else {
+  window.__SCREENSHOT_AI_CONTENT_LOADED__ = true;
+
+  (() => {
   const OVERLAY_ID = '__ai_capture_overlay__';
   const STYLE_ID = '__ai_capture_styles__';
 
@@ -270,9 +275,12 @@
     session.pendingRequestId = requestId; requestToSession.set(requestId, session.id); session.receivedStream = false;
     startAssistantStream(session);
     try {
-      const { ok, text, error } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { history: session.history, requestId } });
+      const { ok, text, error, streamed } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { history: session.history, requestId } });
       if (!ok) throw new Error(error || '调用失败');
-      if (text) { const el = session.lastAssistantEl; if (el) el.querySelector('.content').textContent = text; if (!session.receivedStream) session.history.push({ role: 'assistant', content: [{ type: 'text', text }] }); }
+      if (text) {
+        const el = session.lastAssistantEl; if (el) el.querySelector('.content').textContent = text;
+        if (!streamed) session.history.push({ role: 'assistant', content: [{ type: 'text', text }] });
+      }
     } catch (err) {
       const el = session.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + String(err);
     }
@@ -286,9 +294,12 @@
     s.pendingRequestId = requestId; requestToSession.set(requestId, s.id); s.receivedStream = false;
     startAssistantStream(s);
     try {
-      const { ok, text, error } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { imageDataUrl, requestId } });
+      const { ok, text, error, streamed } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { imageDataUrl, requestId } });
       if (!ok) throw new Error(error || '调用失败');
-      if (text) { const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = text; if (!s.receivedStream) s.history.push({ role: 'assistant', content: [{ type: 'text', text }] }); }
+      if (text) {
+        const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = text;
+        if (!streamed) s.history.push({ role: 'assistant', content: [{ type: 'text', text }] });
+      }
     } catch (err) {
       const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + String(err);
     }
@@ -343,4 +354,5 @@
       return;
     }
   });
-})();
+  })();
+}

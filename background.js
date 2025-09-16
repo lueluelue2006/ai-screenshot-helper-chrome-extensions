@@ -1,30 +1,106 @@
 // background.js (MV3 service worker)
 
-const DEFAULT_SETTINGS = {
-  apiBaseUrl: 'https://api.openai.com',
-  apiPath: '/v1/chat/completions', // 默认 completions；用户可改
-  apiMode: 'completions', // 'completions' | 'responses'（决定 payload 形状）
-  apiKey: '',
-  model: 'o4-mini',
-  reasoningEffort: 'medium', // 'none' | 'minimal' | 'low' | 'medium' | 'high'
-  userPrompt: '请解答这张截图中的题目，并给出详细的推理过程与最终答案。',
-  systemPrompt: '你是一个擅长图文理解和解题的助理。',
-  streamEnabled: true,
-  useTemperature: false,
-  temperature: 1,
-  useMaxTokens: false,
-  maxTokens: 65536
+const PRESET_INFO = {
+  google: {
+    mode: 'completions',
+    defaults: {
+      apiBaseUrl: 'https://generativelanguage.googleapis.com',
+      apiPath: '/v1beta/openai/chat/completions',
+      model: 'gemini-2.5-flash',
+      reasoningEffort: 'high',
+      useTemperature: true,
+      temperature: 0.8,
+      useMaxTokens: false,
+      maxTokens: 65536
+    }
+  },
+  openaiChat: {
+    mode: 'completions',
+    defaults: {
+      apiBaseUrl: 'https://api.openai.com',
+      apiPath: '/v1/chat/completions',
+      model: 'gpt-5-nano',
+      reasoningEffort: 'medium',
+      useTemperature: false,
+      temperature: 1,
+      useMaxTokens: false,
+      maxTokens: 65536
+    }
+  },
+  openaiResponses: {
+    mode: 'responses',
+    defaults: {
+      apiBaseUrl: 'https://api.openai.com',
+      apiPath: '/v1/responses',
+      model: 'gpt-5-nano',
+      reasoningEffort: 'medium',
+      useTemperature: false,
+      temperature: 1,
+      useMaxTokens: false,
+      maxTokens: 65536
+    }
+  },
+  custom: {
+    mode: null,
+    defaults: {
+      apiBaseUrl: '',
+      apiPath: '/v1/chat/completions',
+      model: '',
+      reasoningEffort: 'medium',
+      useTemperature: false,
+      temperature: 1,
+      useMaxTokens: false,
+      maxTokens: 65536
+    }
+  }
 };
+
+const DEFAULT_SETTINGS = {
+  activePreset: 'google',
+  presetConfigs: Object.fromEntries(Object.entries(PRESET_INFO).map(([key, info]) => [key, { ...info.defaults }])),
+  userPrompt: '请阅读我提供的截图或文字：先归纳题目类型、已知条件和求解目标；然后按步骤写出推理过程与使用的公式，列出中间结果；最后汇总最终答案并给出简单检验或结论说明。如需理解图表，请先描述图中要素。',
+  systemPrompt: '你是一名资深教研老师，擅长理解截图里的文字、公式与图表。请先准确复述题意和所有关键条件，推理时逐步解释每一步的依据，并在给出答案前做一次自检；若信息不足或题意含糊，要明确指出缺失内容。',
+  streamEnabled: true
+};
+
+const DEFAULT_API_KEYS = Object.fromEntries(Object.keys(PRESET_INFO).map((k) => [k, '']));
+const DEFAULT_ACTION_TITLE = '截图问AI';
+let actionBadgeTimer = null;
 
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
   const toSet = {};
-  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
-    if (stored[k] === undefined) toSet[k] = v;
+  if (stored.activePreset === undefined) {
+    toSet.activePreset = DEFAULT_SETTINGS.activePreset;
+  }
+  const presetConfigs = { ...(DEFAULT_SETTINGS.presetConfigs || {}) };
+  const storedPresetConfigs = stored.presetConfigs && typeof stored.presetConfigs === 'object' ? stored.presetConfigs : {};
+  for (const [id, defaults] of Object.entries(DEFAULT_SETTINGS.presetConfigs)) {
+    const existing = storedPresetConfigs[id];
+    if (!existing) {
+      presetConfigs[id] = { ...defaults };
+    } else {
+      presetConfigs[id] = { ...defaults, ...existing };
+    }
+  }
+  toSet.presetConfigs = presetConfigs;
+  if (stored.userPrompt === undefined) {
+    toSet.userPrompt = DEFAULT_SETTINGS.userPrompt;
+  }
+  if (stored.systemPrompt === undefined) {
+    toSet.systemPrompt = DEFAULT_SETTINGS.systemPrompt;
+  }
+  if (stored.streamEnabled === undefined) {
+    toSet.streamEnabled = DEFAULT_SETTINGS.streamEnabled;
   }
   if (Object.keys(toSet).length) {
     await chrome.storage.sync.set(toSet);
   }
+
+  const localStored = await chrome.storage.local.get(['apiKeys']);
+  const keys = { ...DEFAULT_API_KEYS, ...(localStored.apiKeys || {}) };
+  await chrome.storage.local.set({ apiKeys: keys });
+
   console.log('[截图问AI] 已安装/更新，默认设置已写入（如需）。');
 });
 
@@ -32,9 +108,14 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.commands.onCommand.addListener(async (command) => {
   console.log('[截图问AI] 收到快捷命令:', command);
   if (command === 'start_screenshot') {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (tab && tab.id) {
-      chrome.tabs.sendMessage(tab.id, { type: 'START_SCREENSHOT' }).catch(() => {});
+    try {
+      const tab = await getActiveTab();
+      if (!tab) return;
+      await triggerScreenshotOnTab(tab);
+      clearActionError();
+    } catch (err) {
+      console.warn('[截图问AI] 快捷键截图失败:', err);
+      await surfaceActionError(String(err || '无法启动截图'));
     }
   }
 });
@@ -46,6 +127,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse?.({ ok: false, error: 'unauthorized' });
     return; // reject other extensions
   }
+  if (msg?.type === 'START_SCREENSHOT_FROM_POPUP') {
+    (async () => {
+      try {
+        let tab = null;
+        if (msg.tabId) {
+          try { tab = await chrome.tabs.get(msg.tabId); } catch (_) { tab = null; }
+        }
+        if (!tab) tab = await getActiveTab();
+        if (!tab) throw new Error('未找到当前标签页');
+        await triggerScreenshotOnTab(tab);
+        clearActionError();
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err) });
+      }
+    })();
+    return true;
+  }
+
   // Open chat tab with initial history (from content script)
   if (msg?.type === 'OPEN_CHAT_TAB') {
     (async () => {
@@ -89,6 +189,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async
   }
 
+  if (msg?.type === 'TEST_CHANNEL') {
+    (async () => {
+      try {
+        const overrideSettings = normalizeSettings(msg.settings || {});
+        if (msg.presetId) overrideSettings.activePreset = msg.presetId;
+        const apiKeys = msg.apiKeys && typeof msg.apiKeys === 'object' ? msg.apiKeys : {};
+        const history = Array.isArray(msg.history) && msg.history.length
+          ? msg.history
+          : [{ role: 'user', content: [{ type: 'text', text: '测试消息，用于检查渠道配置是否有效。' }] }];
+        const result = await callAI({ history, requestId: `test-${Date.now()}` }, null, {
+          overrideSettings,
+          overrideApiKeys: apiKeys,
+          overridePresetId: msg.presetId,
+          forceNonStream: true,
+          suppressClient: true
+        });
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err) });
+      }
+    })();
+    return true;
+  }
+
   // keep listener open for async
   return false;
 });
@@ -99,33 +223,377 @@ async function captureVisible() {
   return dataUrl; // data:image/png;base64,...
 }
 
-async function getSettings() {
-  const cfg = await chrome.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
-  return { ...DEFAULT_SETTINGS, ...cfg };
+async function getActiveTab() {
+  // 1) Try last-focused window's active tab (works for commands)
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab && tab.id) return tab;
+  } catch (_) {}
+  // 2) Fallback: get last focused normal window, then pick its active tab
+  try {
+    const win = await chrome.windows.getLastFocused({ populate: true });
+    if (win && Array.isArray(win.tabs) && win.tabs.length) {
+      const active = win.tabs.find((t) => t.active && t.id);
+      if (active) return active;
+      return win.tabs[0] || null;
+    }
+  } catch (_) {}
+  // 3) Fallback: currentWindow active
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab && tab.id) return tab;
+  } catch (_) {}
+  return null;
 }
 
-async function callAI(userPayload, tabId) {
-  const settings = await getSettings();
+function getOriginPatternFromUrl(url) {
+  try {
+    const u = new URL(url || '');
+    if (!['http:', 'https:'].includes(u.protocol)) return null;
+    return `${u.origin}/*`;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function ensureContentScriptReady(tab) {
+  if (!tab?.id) throw new Error('缺少有效的标签页');
+  if (!/^https?:/i.test(String(tab.url || ''))) throw new Error('当前页面类型不支持截图');
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+    return;
+  } catch (err) {
+    if (isMissingHostPermissionError(err)) {
+      const granted = await requestHostPermissionForTab(tab);
+      if (!granted) {
+        throw buildMissingPermissionError(tab);
+      }
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+      return;
+    }
+    // 已注入时 Chrome 可能抛出“Cannot access contents”之类的错误，但随后 sendMessage 会立即成功。
+    console.warn('[截图问AI] 注入内容脚本时出错（可忽略）:', err);
+  }
+}
+
+function shouldRetryWithInjection(err) {
+  if (!err) return false;
+  const msg = typeof err === 'string' ? err : err?.message || String(err);
+  return msg.includes('Could not establish connection') || msg.includes('Receiving end does not exist');
+}
+
+function isMissingHostPermissionError(err) {
+  if (!err) return false;
+  const msg = typeof err === 'string' ? err : err?.message || String(err);
+  if (!msg) return false;
+  return msg.includes('Cannot access contents of the page')
+    || msg.includes('This page cannot be scripted')
+    || msg.includes('This extension is not allowed to run')
+    || msg.includes('The extensions gallery cannot be scripted')
+    || (msg.includes('permission') && msg.includes('host'));
+}
+
+async function requestHostPermissionForTab(tab) {
+  const originPattern = getOriginPatternFromTab(tab);
+  let granted = false;
+  if (chrome.action?.requestScriptInjection) {
+    try {
+      await chrome.action.requestScriptInjection({
+        target: { tabId: tab.id },
+        files: ['content.js']
+      });
+      granted = true;
+    } catch (err) {
+      if (isUserDismissedError(err)) return false;
+      if (!isGestureRequiredError(err)) {
+        console.warn('[截图问AI] requestScriptInjection 失败:', err);
+      }
+    }
+  }
+  if (!granted && originPattern) {
+    try {
+      const ok = await chrome.permissions.request({ origins: [originPattern] });
+      if (ok) granted = true;
+    } catch (err) {
+      if (isGestureRequiredError(err) || isUserDismissedError(err)) {
+        return false;
+      }
+      console.warn('[截图问AI] permissions.request 失败:', err);
+    }
+  }
+  return granted;
+}
+
+function isUserDismissedError(err) {
+  if (!err) return false;
+  const msg = typeof err === 'string' ? err : err?.message || String(err);
+  return msg.includes('User dismissed') || msg.includes('User denied');
+}
+
+function isGestureRequiredError(err) {
+  if (!err) return false;
+  const msg = typeof err === 'string' ? err : err?.message || String(err);
+  return msg.includes('user gesture') || msg.includes('User gesture') || msg.includes('requires a user gesture');
+}
+
+function buildMissingPermissionError(tab) {
+  const origin = getOriginFromTab(tab);
+  if (origin) {
+    return new Error(`需要先允许扩展访问 ${origin}，请点击地址栏右侧的拼图图标 → 选择“始终允许”。`);
+  }
+  return new Error('需要先允许扩展访问当前页面，点击地址栏右侧的拼图图标授予权限后再试。');
+}
+
+function getOriginFromTab(tab) {
+  try {
+    return new URL(String(tab?.url || '')).origin;
+  } catch (_) {
+    return '';
+  }
+}
+
+async function ensureTabHostPermission(tab) {
+  const pattern = getOriginPatternFromUrl(tab?.url || '');
+  if (!pattern) return;
+  try {
+    const has = await chrome.permissions.contains({ origins: [pattern] });
+    if (has) return;
+  } catch (err) {
+    console.warn('[截图问AI] 检查站点权限失败:', err);
+  }
+  const granted = await requestHostPermissionForTab(tab);
+  if (!granted) {
+    throw buildMissingPermissionError(tab);
+  }
+}
+
+async function triggerScreenshotOnTab(tab) {
+  if (!tab?.id) throw new Error('缺少有效的标签页');
+  await ensureTabHostPermission(tab);
+  try {
+    await ensureContentScriptReady(tab);
+  } catch (err) {
+    if (isMissingHostPermissionError(err)) {
+      const granted = await requestHostPermissionForTab(tab);
+      if (!granted) throw buildMissingPermissionError(tab);
+      await ensureContentScriptReady(tab);
+    } else if (!shouldRetryWithInjection(err)) {
+      throw err;
+    }
+  }
+  const send = async () => {
+    await chrome.tabs.sendMessage(tab.id, { type: 'START_SCREENSHOT' });
+  };
+
+  try {
+    await send();
+    return;
+  } catch (err) {
+    if (isMissingHostPermissionError(err)) {
+      const granted = await requestHostPermissionForTab(tab);
+      if (!granted) throw buildMissingPermissionError(tab);
+      await ensureContentScriptReady(tab);
+    } else if (!shouldRetryWithInjection(err)) {
+      throw err;
+    } else {
+      await ensureContentScriptReady(tab);
+    }
+  }
+  await send();
+}
+
+function clearActionError() {
+  if (actionBadgeTimer) {
+    clearTimeout(actionBadgeTimer);
+    actionBadgeTimer = null;
+  }
+  try {
+    chrome.action.setBadgeText({ text: '' });
+    chrome.action.setTitle({ title: DEFAULT_ACTION_TITLE });
+  } catch (e) {
+    console.warn('[截图问AI] 清除提示失败:', e);
+  }
+}
+
+async function surfaceActionError(message) {
+  try {
+    chrome.action.setBadgeText({ text: '!' });
+    chrome.action.setTitle({ title: `${DEFAULT_ACTION_TITLE}\n${message}`.slice(0, 256) });
+  } catch (e) {
+    console.warn('[截图问AI] 设置提示失败:', e);
+  }
+  if (actionBadgeTimer) clearTimeout(actionBadgeTimer);
+  actionBadgeTimer = setTimeout(() => {
+    actionBadgeTimer = null;
+    try {
+      chrome.action.setBadgeText({ text: '' });
+      chrome.action.setTitle({ title: DEFAULT_ACTION_TITLE });
+    } catch (_) {}
+  }, 6000);
+}
+
+async function getSettings() {
+  const raw = await chrome.storage.sync.get(null);
+  if (raw) {
+    await migrateLegacyApiKey(raw);
+  }
+  return normalizeSettings(raw || {});
+}
+
+function normalizeSettings(raw) {
+  const defaults = structuredClone(DEFAULT_SETTINGS);
+  const settings = structuredClone(DEFAULT_SETTINGS);
+
+  if (typeof raw.streamEnabled === 'boolean') {
+    settings.streamEnabled = raw.streamEnabled;
+  }
+  if (typeof raw.userPrompt === 'string') {
+    settings.userPrompt = raw.userPrompt;
+  }
+  if (typeof raw.systemPrompt === 'string') {
+    settings.systemPrompt = raw.systemPrompt;
+  }
+
+  const storedPresetConfigs = raw.presetConfigs && typeof raw.presetConfigs === 'object' ? raw.presetConfigs : null;
+  if (storedPresetConfigs) {
+    for (const [id, info] of Object.entries(PRESET_INFO)) {
+      const merged = { ...info.defaults, ...(storedPresetConfigs[id] || {}) };
+      settings.presetConfigs[id] = merged;
+    }
+  }
+
+  let activePreset = typeof raw.activePreset === 'string' ? raw.activePreset : null;
+  if (!activePreset && typeof raw.apiPreset === 'string') {
+    activePreset = mapLegacyPreset(raw.apiPreset, raw.apiMode, raw.apiPath);
+  }
+  if (!activePreset || !PRESET_INFO[activePreset]) {
+    activePreset = defaults.activePreset;
+  }
+  settings.activePreset = activePreset;
+
+  if (!storedPresetConfigs) {
+    // Legacy fields fallback
+    const legacyTarget = mapLegacyPreset(raw.apiPreset, raw.apiMode, raw.apiPath) || activePreset;
+    if (legacyTarget && PRESET_INFO[legacyTarget]) {
+      const cfg = settings.presetConfigs[legacyTarget];
+      if (typeof raw.apiBaseUrl === 'string' && raw.apiBaseUrl.trim()) cfg.apiBaseUrl = raw.apiBaseUrl.trim();
+      if (typeof raw.apiPath === 'string' && raw.apiPath.trim()) cfg.apiPath = ensureLeadingSlash(raw.apiPath.trim());
+      if (typeof raw.model === 'string' && raw.model.trim()) cfg.model = raw.model.trim();
+      if (typeof raw.reasoningEffort === 'string') cfg.reasoningEffort = raw.reasoningEffort;
+      if (typeof raw.useTemperature === 'boolean') cfg.useTemperature = raw.useTemperature;
+      if (raw.temperature !== undefined) cfg.temperature = clampNumber(raw.temperature, 0, 2);
+      if (typeof raw.useMaxTokens === 'boolean') cfg.useMaxTokens = raw.useMaxTokens;
+      if (raw.maxTokens !== undefined) cfg.maxTokens = clampInt(raw.maxTokens, 1, 9999999);
+    }
+  }
+
+  // Ensure each preset config exists even if missing in storage
+  for (const [id, info] of Object.entries(PRESET_INFO)) {
+    if (!settings.presetConfigs[id]) {
+      settings.presetConfigs[id] = { ...info.defaults };
+    } else {
+      settings.presetConfigs[id] = { ...info.defaults, ...settings.presetConfigs[id] };
+    }
+  }
+
+  return settings;
+}
+
+function ensureLeadingSlash(path) {
+  if (!path) return path;
+  return path.startsWith('/') ? path : '/' + path;
+}
+
+function mapLegacyPreset(apiPreset, apiMode, apiPath) {
+  if (apiPreset === 'google') return 'google';
+  if (apiPreset === 'custom') return 'custom';
+  if (apiPreset === 'openai') {
+    if (apiMode === 'responses' || (typeof apiPath === 'string' && apiPath.includes('/responses'))) {
+      return 'openaiResponses';
+    }
+    return 'openaiChat';
+  }
+  if (typeof apiMode === 'string') {
+    if (apiMode === 'responses') return 'openaiResponses';
+    if (apiMode === 'completions') return 'openaiChat';
+  }
+  if (typeof apiPath === 'string' && apiPath.includes('/responses')) return 'openaiResponses';
+  return null;
+}
+
+function resolvePresetConfig(settings, presetId) {
+  const defaults = PRESET_INFO[presetId]?.defaults || {};
+  const stored = settings?.presetConfigs?.[presetId] || {};
+  return { ...defaults, ...stored };
+}
+
+async function getApiKeyForPreset(presetId) {
+  try {
+    const { apiKeys } = await chrome.storage.local.get(['apiKeys']);
+    if (apiKeys && typeof apiKeys === 'object' && apiKeys[presetId]) {
+      return String(apiKeys[presetId] || '').trim();
+    }
+  } catch (_) {}
+  return '';
+}
+
+async function migrateLegacyApiKey(raw) {
+  const legacyKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
+  if (!legacyKey) return;
+  const preset = mapLegacyPreset(raw.apiPreset, raw.apiMode, raw.apiPath) || DEFAULT_SETTINGS.activePreset;
+  const localStored = await chrome.storage.local.get(['apiKeys']);
+  const merged = { ...DEFAULT_API_KEYS, ...(localStored.apiKeys || {}) };
+  if (!merged[preset]) {
+    merged[preset] = legacyKey;
+    await chrome.storage.local.set({ apiKeys: merged });
+  }
+  await chrome.storage.sync.remove('apiKey');
+}
+
+async function callAI(userPayload, tabId, opts = {}) {
+  const settings = opts.overrideSettings ? normalizeSettings(opts.overrideSettings) : await getSettings();
   // Only accept image data from the caller; all other configs are from storage.
   const imageDataUrl = userPayload?.imageDataUrl;
   const history = Array.isArray(userPayload?.history) ? userPayload.history : null;
-  const apiBaseUrl = settings.apiBaseUrl;
-  const apiPath = settings.apiPath;
-  const apiMode = settings.apiMode || inferModeFromPath(apiPath);
-  const apiKey = settings.apiKey;
-  const model = settings.model;
-  const reasoningEffort = settings.reasoningEffort;
+  const presetId = opts.overridePresetId || settings.activePreset || 'google';
+  const presetInfo = PRESET_INFO[presetId] || {};
+  const presetConfig = resolvePresetConfig(settings, presetId);
+  let { apiBaseUrl, apiPath, model, reasoningEffort } = presetConfig;
+  apiBaseUrl = (apiBaseUrl || '').trim();
+  apiPath = ensureLeadingSlash((apiPath || '').trim());
+  model = (model || '').trim();
+  if (!reasoningEffort) {
+    reasoningEffort = presetInfo.defaults?.reasoningEffort || 'medium';
+  }
+  const apiMode = presetInfo.mode || inferModeFromPath(apiPath);
   const systemPrompt = settings.systemPrompt;
   const userPrompt = settings.userPrompt;
-  const streamEnabled = !!settings.streamEnabled;
+  const streamEnabled = opts.forceNonStream ? false : !!settings.streamEnabled;
   const requestId = userPayload?.requestId;
-  const useTemperature = !!settings.useTemperature;
-  const temperature = clampNumber(settings.temperature, 0, 2);
-  const useMaxTokens = !!settings.useMaxTokens;
-  const maxTokens = clampInt(settings.maxTokens, 1, 9999999);
+  const useTemperature = !!presetConfig.useTemperature;
+  const temperature = clampNumber(presetConfig.temperature, 0, 2);
+  const useMaxTokens = !!presetConfig.useMaxTokens;
+  const maxTokens = clampInt(presetConfig.maxTokens, 1, 9999999);
 
+  const overrideApiKeys = opts.overrideApiKeys && typeof opts.overrideApiKeys === 'object' ? opts.overrideApiKeys : null;
+  const apiKey = overrideApiKeys ? String(overrideApiKeys[presetId] || '').trim() : await getApiKeyForPreset(presetId);
+
+  if (!apiBaseUrl) {
+    const defaults = PRESET_INFO[presetId]?.defaults;
+    apiBaseUrl = defaults?.apiBaseUrl || apiBaseUrl;
+  }
+  if (!apiPath) {
+    const defaults = PRESET_INFO[presetId]?.defaults;
+    apiPath = defaults?.apiPath || apiPath;
+  }
+  if (!apiBaseUrl) {
+    return { ok: false, error: '缺少 API Base URL，请在扩展选项中设置。' };
+  }
   if (!apiKey) {
     return { ok: false, error: '缺少 API Key，请在扩展选项中设置。' };
+  }
+  if (!model) {
+    return { ok: false, error: '缺少模型名称，请在扩展选项中设置。' };
   }
   if (!imageDataUrl && !(history && history.length)) {
     return { ok: false, error: '缺少输入：请提供对话上下文或图片。' };
@@ -162,7 +630,7 @@ async function callAI(userPayload, tabId) {
     ? buildResponsesPayloadFromHistory({ history, model, systemPrompt, reasoningEffort, useTemperature, temperature, useMaxTokens, maxTokens })
     : (() => {
         const input = [
-          ...(systemPrompt ? [{ role: 'system', content: [{ type: 'text', text: systemPrompt }] }] : []),
+          ...(systemPrompt ? [{ role: 'system', content: [{ type: 'input_text', text: systemPrompt }] }] : []),
           {
             role: 'user',
             content: [
@@ -185,9 +653,10 @@ async function callAI(userPayload, tabId) {
   };
 
   try {
+    const targetTabId = opts.suppressClient ? null : tabId;
     if (streamEnabled) {
-      const finalText = await streamAI({ url, headers, apiMode, chatPayload, responsesPayload, tabId, requestId });
-      return { ok: true, text: finalText ?? '' };
+      const finalText = await streamAI({ url, headers, apiMode, chatPayload, responsesPayload, tabId: targetTabId, requestId, suppressClient: !!opts.suppressClient });
+      return { ok: true, text: finalText ?? '', streamed: true };
     } else {
       const body = JSON.stringify(apiMode === 'completions' ? chatPayload : responsesPayload);
       const res = await fetch(url, { method: 'POST', headers, body });
@@ -197,7 +666,7 @@ async function callAI(userPayload, tabId) {
         return { ok: false, error: `调用失败: ${errMsg}` };
       }
       const text = extractText(parsed);
-      return { ok: true, text: text ?? '(无内容)' };
+      return { ok: true, text: text ?? '(无内容)', streamed: false };
     }
   } catch (e) {
     return { ok: false, error: String(e) };
@@ -244,7 +713,7 @@ function buildChatPayloadFromHistory({ history, model, systemPrompt, reasoningEf
 function buildResponsesPayloadFromHistory({ history, model, systemPrompt, reasoningEffort, useTemperature, temperature, useMaxTokens, maxTokens }) {
   const input = [];
   if (systemPrompt && !hasSystemInHistory(history)) {
-    input.push({ role: 'system', content: [{ type: 'text', text: systemPrompt }] });
+    input.push({ role: 'system', content: [{ type: 'input_text', text: systemPrompt }] });
   }
   for (const turn of history) {
     const role = turn?.role;
@@ -262,7 +731,7 @@ function buildResponsesPayloadFromHistory({ history, model, systemPrompt, reason
       input.push({ role: 'assistant', content: [{ type: 'output_text', text }] });
     } else if (role === 'system') {
       const text = contentBlocks.map((b) => (b?.type === 'text' ? b.text : '')).filter(Boolean).join('\n');
-      input.push({ role: 'system', content: [{ type: 'text', text }] });
+      input.push({ role: 'system', content: [{ type: 'input_text', text }] });
     }
   }
   addConciseSystemToResponsesInput(input);
@@ -282,8 +751,12 @@ function addConciseSystemToChatMessages(messages) {
 }
 function addConciseSystemToResponsesInput(input) {
   try {
-    const exists = input.some((m) => m?.role === 'system' && Array.isArray(m.content) && m.content.some((c) => typeof c?.text === 'string' && c.text.includes('尽可能精简回答')));
-    if (!exists) input.unshift({ role: 'system', content: [{ type: 'text', text: CONCISE_TEXT }] });
+    const exists = input.some((m) => m?.role === 'system' && Array.isArray(m.content) && m.content.some((c) => {
+      if (typeof c?.text !== 'string') return false;
+      const t = c?.type;
+      return (!t || t === 'input_text' || t === 'text') && c.text.includes('尽可能精简回答');
+    }));
+    if (!exists) input.unshift({ role: 'system', content: [{ type: 'input_text', text: CONCISE_TEXT }] });
   } catch (_) {}
 }
 
@@ -359,7 +832,7 @@ function inferModeFromPath(apiPath) {
   return apiPath.includes('/responses') ? 'responses' : 'completions';
 }
 
-async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, tabId, requestId }) {
+async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, tabId, requestId, suppressClient }) {
   // Add stream: true flag
   const payload = apiMode === 'completions' ? { ...chatPayload, stream: true } : { ...responsesPayload, stream: true };
   const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
@@ -367,7 +840,7 @@ async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, 
     const parsed = await safeJson(res);
     const errMsg = extractErr(parsed) || `HTTP ${res.status}`;
     const msg = { type: 'AI_STREAM_DONE', ok: false, error: `调用失败: ${errMsg}`, requestId };
-    sendToClient(tabId, msg);
+    emitToClients(tabId, msg, suppressClient);
     throw new Error(errMsg);
   }
   const reader = res.body?.getReader();
@@ -377,7 +850,7 @@ async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, 
   const sendDelta = (delta) => {
     if (!delta) return;
     full += delta;
-    sendToClient(tabId, { type: 'AI_STREAM', delta, requestId });
+    emitToClients(tabId, { type: 'AI_STREAM', delta, requestId }, suppressClient);
   };
   if (!reader) return '';
   while (true) {
@@ -395,7 +868,7 @@ async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, 
         if (!trimmed.startsWith('data:')) continue;
         const data = trimmed.slice(5).trim();
         if (data === '[DONE]') {
-          sendToClient(tabId, { type: 'AI_STREAM_DONE', ok: true, text: full, requestId });
+          emitToClients(tabId, { type: 'AI_STREAM_DONE', ok: true, text: full, requestId }, suppressClient);
           return full;
         }
         try {
@@ -404,7 +877,7 @@ async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, 
           if (deltaText) sendDelta(deltaText);
           // Some responses API variants signal completion via a typed event
           if (obj?.type === 'response.completed') {
-            sendToClient(tabId, { type: 'AI_STREAM_DONE', ok: true, text: full, requestId });
+            emitToClients(tabId, { type: 'AI_STREAM_DONE', ok: true, text: full, requestId }, suppressClient);
             return full;
           }
         } catch (_) {
@@ -413,7 +886,7 @@ async function streamAI({ url, headers, apiMode, chatPayload, responsesPayload, 
       }
     }
   }
-  sendToClient(tabId, { type: 'AI_STREAM_DONE', ok: true, text: full, requestId });
+  emitToClients(tabId, { type: 'AI_STREAM_DONE', ok: true, text: full, requestId }, suppressClient);
   return full;
 }
 
@@ -460,10 +933,10 @@ function clampInt(n, min, max) {
   return Math.min(max, Math.max(min, v | 0));
 }
 
-function sendToClient(tabId, msg) {
+function emitToClients(tabId, msg, suppress) {
+  if (suppress) return;
   try {
     if (tabId != null) chrome.tabs.sendMessage(tabId, msg).catch(() => {});
-    // Also broadcast to extension pages (chat.html) which listen via runtime.onMessage
     chrome.runtime.sendMessage(msg).catch(() => {});
   } catch (_) {}
 }

@@ -61,13 +61,13 @@
     state.receivedStream = false;
     startAssistantStream();
     try {
-      const { ok, text, error } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { history: state.history, requestId } });
+      const { ok, text, error, streamed } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { history: state.history, requestId } });
       if (!ok) throw new Error(error || '调用失败');
       if (text) {
         // Non-stream fallback: update content; history will be appended on AI_STREAM_DONE if streaming, otherwise add now
         const el = state.lastAssistantEl; if (el) el.querySelector('.content').textContent = text;
-        // If no stream delta was received, treat as non-stream and append history here
-        if (!state.receivedStream) {
+        // If后端未启用流式，就直接记录历史
+        if (!streamed) {
           state.history.push({ role: 'assistant', content: [{ type: 'text', text }] });
         }
       }

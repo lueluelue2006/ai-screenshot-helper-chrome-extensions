@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "截图问AI",
   "description": "使用快捷键选区截图并发送给AI解题，支持自定义接口与提示词。",
-  "version": "0.1.0",
+  "version": "1.0.9",
   "action": {
     "default_title": "截图问AI",
     "default_popup": "popup.html"
@@ -14,20 +14,17 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://api.openai.com/*"
+    "<all_urls>",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*"
   ],
-  "optional_host_permissions": [
-    "<all_urls>"
-  ],
+  "optional_host_permissions": [],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "commands": {
     "start_screenshot": {
-      "suggested_key": {
-        "mac": "Ctrl+Command+Z"
-      },
       "description": "开始截图并向AI提问"
     }
   },
@@ -36,7 +33,9 @@
       "matches": [
         "<all_urls>"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
