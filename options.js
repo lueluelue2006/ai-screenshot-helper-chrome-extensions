@@ -63,8 +63,8 @@ const PRESETS = {
 const DEFAULT_SETTINGS = {
   activePreset: 'google',
   presetConfigs: Object.fromEntries(Object.entries(PRESETS).map(([id, info]) => [id, { ...info.defaults }])),
-  userPrompt: '请阅读我提供的截图或文字：先在心里确认题目类型、已知条件与求解目标，再在输出中用简洁的条目或短段落概述解法步骤、关键公式和最终答案。若涉及图表，请先用相同语言简要说明图中要素。除非我追问，否则控制在必要信息范围内，同时保证推理严谨。',
-  systemPrompt: '你是一名资深教研老师，擅长理解截图里的文字、公式与图表。请先在内部完整推演所有关键步骤，确认推理成立后再回答。对用户输出时保持精炼（概述要点+步骤+结论即可），除非用户追问细节。默认使用用户提问所用语言作答，无法判断时使用简体中文。若信息不足，请明确指出缺失内容并说明需要的补充。',
+  userPrompt: '请解读图中的内容，或者解答图中问题。',
+  systemPrompt: '你是一名截图内容解读助手，请使用用户所用语言，简洁描述图中的关键信息与明显的要点，或解答图中提出的问题。',
   streamEnabled: true
 };
 
