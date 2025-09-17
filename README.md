@@ -32,3 +32,7 @@
 - 扩展不会自动记录或上传用户的 API Key，所有密钥仅保存在本地 `chrome.storage.local`（未额外加密），请自行确认安全性。
 - 代码与文案均为 GPT-5 即兴生成，未参考或复用任何其他同类项目，如有雷同纯属巧合。
 - 灵感来源于 macOS 上的伟大公益应用 **Highlight**（[highlightai.com](https://highlightai.com/)），感谢其对屏幕截图问答的启发。
+
+<img width="883" height="386" alt="iShot_2025-09-17_01 50 11" src="https://github.com/user-attachments/assets/a7d39e78-6fdb-4c80-9b04-b4093e43b3d4" />
+<img width="1140" height="526" alt="iShot_2025-09-17_01 55 29" src="https://github.com/user-attachments/assets/c2bf4e7a-ac46-4a52-850e-c2ca7a6e7b54" />
+<img width="1388" height="880" alt="iShot_2025-09-17_02 08 36" src="https://github.com/user-attachments/assets/a9615d5d-4d22-4bab-a8d7-2119da2dd20e" />
