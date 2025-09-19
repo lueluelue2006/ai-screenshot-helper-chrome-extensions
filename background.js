@@ -55,11 +55,22 @@ const PRESET_INFO = {
   }
 };
 
+const DEFAULT_PROMPT_SETS = [
+  {
+    id: 'default',
+    name: '默认提示',
+    userPrompt: '请解读图中的内容，或者解答图中问题。',
+    systemPrompt: '你是一名截图内容解读助手，请使用用户所用语言，简洁描述图中的关键信息与明显的要点，或解答图中提出的问题。'
+  }
+];
+
 const DEFAULT_SETTINGS = {
   activePreset: 'google',
   presetConfigs: Object.fromEntries(Object.entries(PRESET_INFO).map(([key, info]) => [key, { ...info.defaults }])),
-  userPrompt: '请解读图中的内容，或者解答图中问题。',
-  systemPrompt: '你是一名截图内容解读助手，请使用用户所用语言，简洁描述图中的关键信息与明显的要点，或解答图中提出的问题。',
+  promptSets: structuredClone(DEFAULT_PROMPT_SETS),
+  activePromptId: DEFAULT_PROMPT_SETS[0].id,
+  userPrompt: DEFAULT_PROMPT_SETS[0].userPrompt,
+  systemPrompt: DEFAULT_PROMPT_SETS[0].systemPrompt,
   streamEnabled: true
 };
 
@@ -84,11 +95,20 @@ chrome.runtime.onInstalled.addListener(async () => {
     }
   }
   toSet.presetConfigs = presetConfigs;
+  const promptState = coercePromptState(stored, DEFAULT_SETTINGS);
+  const storedPromptSets = Array.isArray(stored.promptSets) ? stored.promptSets : null;
+  const needsPromptInit = !storedPromptSets || !storedPromptSets.length || storedPromptSets.some((item) => !item || typeof item.id !== 'string' || !item.id.trim());
+  if (needsPromptInit) {
+    toSet.promptSets = promptState.promptSets;
+  }
+  if (stored.activePromptId === undefined || !promptState.promptSets.some((p) => p.id === stored.activePromptId)) {
+    toSet.activePromptId = promptState.activePromptId;
+  }
   if (stored.userPrompt === undefined) {
-    toSet.userPrompt = DEFAULT_SETTINGS.userPrompt;
+    toSet.userPrompt = promptState.activePrompt.userPrompt;
   }
   if (stored.systemPrompt === undefined) {
-    toSet.systemPrompt = DEFAULT_SETTINGS.systemPrompt;
+    toSet.systemPrompt = promptState.activePrompt.systemPrompt;
   }
   if (stored.streamEnabled === undefined) {
     toSet.streamEnabled = DEFAULT_SETTINGS.streamEnabled;
@@ -444,15 +464,13 @@ function normalizeSettings(raw) {
   const defaults = structuredClone(DEFAULT_SETTINGS);
   const settings = structuredClone(DEFAULT_SETTINGS);
 
-  if (typeof raw.streamEnabled === 'boolean') {
-    settings.streamEnabled = raw.streamEnabled;
-  }
-  if (typeof raw.userPrompt === 'string') {
-    settings.userPrompt = raw.userPrompt;
-  }
-  if (typeof raw.systemPrompt === 'string') {
-    settings.systemPrompt = raw.systemPrompt;
-  }
+  settings.streamEnabled = typeof raw.streamEnabled === 'boolean' ? raw.streamEnabled : defaults.streamEnabled;
+
+  const promptState = coercePromptState(raw, defaults);
+  settings.promptSets = promptState.promptSets;
+  settings.activePromptId = promptState.activePromptId;
+  settings.userPrompt = promptState.activePrompt.userPrompt;
+  settings.systemPrompt = promptState.activePrompt.systemPrompt;
 
   const storedPresetConfigs = raw.presetConfigs && typeof raw.presetConfigs === 'object' ? raw.presetConfigs : null;
   if (storedPresetConfigs) {
@@ -497,6 +515,90 @@ function normalizeSettings(raw) {
   }
 
   return settings;
+}
+
+function coercePromptState(raw, defaults = DEFAULT_SETTINGS) {
+  const fallbackList = Array.isArray(defaults.promptSets) && defaults.promptSets.length
+    ? defaults.promptSets
+    : DEFAULT_PROMPT_SETS;
+  const fallbackPrompt = fallbackList[0] || DEFAULT_PROMPT_SETS[0];
+
+  const sanitized = [];
+  const seenIds = new Set();
+
+  const pushPrompt = (entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    let id = typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : generatePromptId(seenIds);
+    while (seenIds.has(id)) {
+      id = generatePromptId(seenIds);
+    }
+    const nameRaw = typeof entry.name === 'string' ? entry.name : '';
+    const name = sanitizePromptName(nameRaw, sanitized.length);
+    const systemPrompt = typeof entry.systemPrompt === 'string' ? entry.systemPrompt : '';
+    const userPrompt = typeof entry.userPrompt === 'string' ? entry.userPrompt : '';
+    sanitized.push({ id, name, systemPrompt, userPrompt });
+    seenIds.add(id);
+  };
+
+  if (Array.isArray(raw.promptSets) && raw.promptSets.length) {
+    for (const entry of raw.promptSets) {
+      pushPrompt(entry);
+    }
+  }
+
+  if (!sanitized.length) {
+    pushPrompt({
+      id: fallbackPrompt.id,
+      name: fallbackPrompt.name,
+      systemPrompt: typeof raw.systemPrompt === 'string' ? raw.systemPrompt : fallbackPrompt.systemPrompt,
+      userPrompt: typeof raw.userPrompt === 'string' ? raw.userPrompt : fallbackPrompt.userPrompt
+    });
+  }
+
+  if (!sanitized.length) {
+    pushPrompt(fallbackPrompt);
+  }
+
+  let activePromptId = typeof raw.activePromptId === 'string' && raw.activePromptId.trim()
+    ? raw.activePromptId.trim()
+    : null;
+  if (!activePromptId || !sanitized.some((p) => p.id === activePromptId)) {
+    activePromptId = sanitized[0].id;
+  }
+
+  const activePrompt = sanitized.find((p) => p.id === activePromptId) || sanitized[0];
+
+  return {
+    promptSets: sanitized,
+    activePromptId,
+    activePrompt
+  };
+}
+
+function getActivePrompt(settings) {
+  if (!settings) return null;
+  const prompts = Array.isArray(settings.promptSets) ? settings.promptSets : [];
+  const activeId = typeof settings.activePromptId === 'string' ? settings.activePromptId : null;
+  const prompt = prompts.find((item) => item && item.id === activeId);
+  if (prompt) return prompt;
+  return prompts[0] || {
+    systemPrompt: settings.systemPrompt || '',
+    userPrompt: settings.userPrompt || ''
+  };
+}
+
+function sanitizePromptName(nameRaw, index = 0) {
+  const trimmed = typeof nameRaw === 'string' ? nameRaw.trim() : '';
+  if (trimmed) return trimmed.slice(0, 60);
+  return `提示词 ${index + 1}`;
+}
+
+function generatePromptId(existing = new Set()) {
+  let candidate;
+  do {
+    candidate = `prompt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  } while (existing.has(candidate));
+  return candidate;
 }
 
 function ensureLeadingSlash(path) {
@@ -566,8 +668,9 @@ async function callAI(userPayload, tabId, opts = {}) {
     reasoningEffort = presetInfo.defaults?.reasoningEffort || 'medium';
   }
   const apiMode = presetInfo.mode || inferModeFromPath(apiPath);
-  const systemPrompt = settings.systemPrompt;
-  const userPrompt = settings.userPrompt;
+  const activePrompt = getActivePrompt(settings);
+  const systemPrompt = activePrompt?.systemPrompt || '';
+  const userPrompt = activePrompt?.userPrompt || '';
   const streamEnabled = opts.forceNonStream ? false : !!settings.streamEnabled;
   const requestId = userPayload?.requestId;
   const useTemperature = !!presetConfig.useTemperature;

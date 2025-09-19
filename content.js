@@ -10,7 +10,7 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
   const STYLE_ID = '__ai_capture_styles__';
 
   // Sessions & request routing
-  const sessions = new Map(); // id -> { id, panel, body, input, history, pendingRequestId, lastAssistantEl, receivedStream }
+  const sessions = new Map(); // id -> { id, panel, body, input, history, pendingRequestId, lastAssistantEl, lastAssistantRaw, receivedStream }
   const requestToSession = new Map(); // requestId -> sessionId
 
   // Selection state
@@ -48,6 +48,17 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
       .ai-panel .msg.user { background: #0b1220; color: #cbd5e1; align-self: flex-end; }
       .ai-panel .msg.assistant { background: #111827; color: #e5e7eb; align-self: stretch; }
       .ai-panel .msg .role { font-size: 12px; color: #9ca3af; margin-bottom: 4px; }
+      .ai-panel .msg .content { overflow-wrap: anywhere; }
+      .ai-panel .msg .content a { color: #60a5fa; text-decoration: underline; }
+      .ai-panel .msg .content pre { background: #0b1220; border: 1px solid #1f2937; padding: 8px 10px; border-radius: 8px; overflow: auto; font-size: 13px; }
+      .ai-panel .msg .content pre { position: relative; }
+      .ai-panel .msg .content code { background: rgba(15,23,42,0.75); border-radius: 4px; padding: 2px 4px; font-family: ui-monospace, SFMono-Regular, SFMono, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 13px; }
+      .ai-panel .msg .content pre code { background: transparent; padding: 0; }
+      /* 三连击复制，不再需要按钮样式 */
+      .ai-panel .msg .content ul, .ai-panel .msg .content ol { padding-left: 1.25em; margin: 0.4em 0; }
+      .ai-panel .msg .content table { border-collapse: collapse; margin: 0.6em 0; max-width: 100%; }
+      .ai-panel .msg .content th, .ai-panel .msg .content td { border: 1px solid #1f2937; padding: 6px 8px; text-align: left; }
+      .ai-panel .msg .content p { margin: 0.4em 0; }
     `;
     document.head.appendChild(style);
   }
@@ -205,7 +216,7 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
     const fileInput = document.createElement('input');
     fileInput.type = 'file'; fileInput.accept = 'image/*'; fileInput.multiple = true; fileInput.style.display = 'none';
     panel.appendChild(fileInput);
-    const session = { id, panel, body, input, history: [], pendingRequestId: null, lastAssistantEl: null, receivedStream: false, pendingImages: [], attachInfo, fileInput, attachBtn };
+    const session = { id, panel, body, input, history: [], pendingRequestId: null, lastAssistantEl: null, lastAssistantRaw: '', receivedStream: false, pendingImages: [], attachInfo, fileInput, attachBtn };
     sessions.set(id, session);
 
     panel.addEventListener('click', (e) => {
@@ -228,8 +239,14 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
       await askAIWithHistory(session);
     };
     sendBtn?.addEventListener('click', send);
+    // IME-friendly Enter handling
+    let isComposing = false;
+    input?.addEventListener('compositionstart', () => { isComposing = true; });
+    input?.addEventListener('compositionend', () => { isComposing = false; });
     input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+      // Avoid sending while using IME (Chinese/Japanese etc.)
+      const composing = isComposing || e.isComposing === true || e.keyCode === 229;
+      if (e.key === 'Enter' && !e.shiftKey && !composing) { e.preventDefault(); send(); }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
     });
     // Attach images: button + file input
@@ -252,21 +269,42 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
     return session;
   }
 
+  function setMessageContent(contentEl, text, asMarkdown = true) {
+    if (!contentEl) return;
+    const str = typeof text === 'string' ? text : '';
+    if (asMarkdown && typeof window.__screenshotRenderMarkdown === 'function') {
+      window.__screenshotRenderMarkdown(contentEl, str);
+    } else if (typeof window.__screenshotSetPlainText === 'function') {
+      window.__screenshotSetPlainText(contentEl, str);
+    } else {
+      contentEl.textContent = str;
+    }
+  }
+
   function appendMessage(session, role, text) {
     const div = document.createElement('div'); div.className = `msg ${role}`;
     const roleName = role === 'user' ? '你' : role === 'assistant' ? 'AI' : '系统';
     div.innerHTML = `<div class="role">${roleName}</div><div class="content"></div>`;
-    const content = div.querySelector('.content'); content.textContent = text;
+    const content = div.querySelector('.content');
+    setMessageContent(content, text, true);
     session.body.appendChild(div); session.body.scrollTop = session.body.scrollHeight;
+    if (role === 'assistant') session.lastAssistantRaw = typeof text === 'string' ? text : '';
     return div;
   }
 
-  function startAssistantStream(session) { session.lastAssistantEl = appendMessage(session, 'assistant', '思考中…'); }
+  function startAssistantStream(session) {
+    session.lastAssistantEl = appendMessage(session, 'assistant', '思考中…');
+    session.lastAssistantRaw = '';
+  }
   function appendAssistantDelta(session, delta) {
     const el = session.lastAssistantEl || startAssistantStream(session);
+    session.lastAssistantRaw = (session.lastAssistantRaw || '') + (typeof delta === 'string' ? delta : '');
     const content = el.querySelector('.content');
-    const prev = content.textContent === '思考中…' ? '' : (content.textContent || '');
-    content.textContent = prev + delta;
+    if (session.lastAssistantRaw) {
+      setMessageContent(content, session.lastAssistantRaw, true);
+    } else {
+      setMessageContent(content, '');
+    }
     session.body.scrollTop = session.body.scrollHeight;
   }
 
@@ -278,11 +316,15 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
       const { ok, text, error, streamed } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { history: session.history, requestId } });
       if (!ok) throw new Error(error || '调用失败');
       if (text) {
-        const el = session.lastAssistantEl; if (el) el.querySelector('.content').textContent = text;
+        const el = session.lastAssistantEl; if (el) {
+          const content = el.querySelector('.content');
+          session.lastAssistantRaw = text;
+          setMessageContent(content, text, true);
+        }
         if (!streamed) session.history.push({ role: 'assistant', content: [{ type: 'text', text }] });
       }
     } catch (err) {
-      const el = session.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + String(err);
+      const el = session.lastAssistantEl; if (el) setMessageContent(el.querySelector('.content'), '错误：' + String(err), false);
     }
   }
 
@@ -297,11 +339,15 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
       const { ok, text, error, streamed } = await chrome.runtime.sendMessage({ type: 'CALL_AI', payload: { imageDataUrl, requestId } });
       if (!ok) throw new Error(error || '调用失败');
       if (text) {
-        const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = text;
+        const el = s.lastAssistantEl; if (el) {
+          const content = el.querySelector('.content');
+          s.lastAssistantRaw = text;
+          setMessageContent(content, text, true);
+        }
         if (!streamed) s.history.push({ role: 'assistant', content: [{ type: 'text', text }] });
       }
     } catch (err) {
-      const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + String(err);
+      const el = s.lastAssistantEl; if (el) setMessageContent(el.querySelector('.content'), '错误：' + String(err), false);
     }
   }
 
@@ -348,8 +394,18 @@ if (window.__SCREENSHOT_AI_CONTENT_LOADED__) {
     }
     if (msg?.type === 'AI_STREAM_DONE' && typeof msg.requestId === 'string') {
       const sid = requestToSession.get(msg.requestId); if (!sid) return; const s = sessions.get(sid); if (!s) return;
-      if (!msg.ok) { const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + (msg.error || '未知错误'); }
-      else { const el = s.lastAssistantEl; if (el) el.querySelector('.content').textContent = msg.text || '(无内容)'; s.history.push({ role: 'assistant', content: [{ type: 'text', text: msg.text || '' }] }); }
+      if (!msg.ok) {
+        const el = s.lastAssistantEl; if (el) setMessageContent(el.querySelector('.content'), '错误：' + (msg.error || '未知错误'), false);
+        s.lastAssistantRaw = '';
+      }
+      else {
+        const el = s.lastAssistantEl; if (el) {
+          const finalText = msg.text || '(无内容)';
+          s.lastAssistantRaw = msg.text || '';
+          setMessageContent(el.querySelector('.content'), finalText, true);
+        }
+        s.history.push({ role: 'assistant', content: [{ type: 'text', text: msg.text || '' }] });
+      }
       s.pendingRequestId = null; s.receivedStream = false; requestToSession.delete(msg.requestId);
       return;
     }

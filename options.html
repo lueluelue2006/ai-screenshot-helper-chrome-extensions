@@ -17,6 +17,10 @@
       button.secondary { background: #fff; color: #111; }
       button.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
       small { color: #6b7280; }
+      .prompt-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+      .prompt-row select { min-width: 220px; }
+      .prompt-actions { display: flex; gap: 8px; }
+      .prompt-actions button { white-space: nowrap; }
     </style>
   </head>
   <body>
@@ -100,6 +104,17 @@
 
     <div class="section">
       <h2>提示词</h2>
+      <div class="prompt-row">
+        <div style="flex:1; min-width: 220px;">
+          <label for="promptSelect">提示词集合</label>
+          <select id="promptSelect"></select>
+        </div>
+        <div class="prompt-actions">
+          <button id="promptAdd" class="secondary" type="button">新增</button>
+          <button id="promptRename" class="secondary" type="button">重命名</button>
+          <button id="promptDelete" class="danger" type="button">删除</button>
+        </div>
+      </div>
       <div>
         <label for="systemPrompt">System Prompt</label>
         <textarea id="systemPrompt" placeholder="你是一个擅长图文理解和解题的助理。"></textarea>

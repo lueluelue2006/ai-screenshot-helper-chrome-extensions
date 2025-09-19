@@ -13,30 +13,50 @@
     history: [],
     pendingRequestId: null,
     lastAssistantEl: null,
+    lastAssistantRaw: '',
     receivedStream: false,
     pendingImages: [],
   };
+
+  function setContent(target, text, asMarkdown = true) {
+    if (!target) return;
+    const str = typeof text === 'string' ? text : '';
+    if (asMarkdown && typeof window.__screenshotRenderMarkdown === 'function') {
+      window.__screenshotRenderMarkdown(target, str);
+    } else if (typeof window.__screenshotSetPlainText === 'function') {
+      window.__screenshotSetPlainText(target, str);
+    } else {
+      target.textContent = str;
+    }
+  }
 
   function appendMessage(role, text) {
     const div = document.createElement('div');
     div.className = `msg ${role}`;
     const roleName = role === 'user' ? '你' : role === 'assistant' ? 'AI' : '系统';
     div.innerHTML = `<div class="role">${roleName}</div><div class="content"></div>`;
-    div.querySelector('.content').textContent = text;
+    const content = div.querySelector('.content');
+    setContent(content, text, true);
     bodyEl.appendChild(div);
     bodyEl.scrollTop = bodyEl.scrollHeight;
+    if (role === 'assistant') state.lastAssistantRaw = typeof text === 'string' ? text : '';
     return div;
   }
 
   function startAssistantStream() {
     state.lastAssistantEl = appendMessage('assistant', '思考中…');
+    state.lastAssistantRaw = '';
   }
 
   function appendAssistantDelta(delta) {
     const el = state.lastAssistantEl || startAssistantStream();
+    state.lastAssistantRaw = (state.lastAssistantRaw || '') + (typeof delta === 'string' ? delta : '');
     const content = el.querySelector('.content');
-    const prev = content.textContent === '思考中…' ? '' : (content.textContent || '');
-    content.textContent = prev + delta;
+    if (state.lastAssistantRaw) {
+      setContent(content, state.lastAssistantRaw, true);
+    } else {
+      setContent(content, '', false);
+    }
     bodyEl.scrollTop = bodyEl.scrollHeight;
   }
 
@@ -65,14 +85,19 @@
       if (!ok) throw new Error(error || '调用失败');
       if (text) {
         // Non-stream fallback: update content; history will be appended on AI_STREAM_DONE if streaming, otherwise add now
-        const el = state.lastAssistantEl; if (el) el.querySelector('.content').textContent = text;
+        const el = state.lastAssistantEl;
+        if (el) {
+          const content = el.querySelector('.content');
+          state.lastAssistantRaw = text;
+          setContent(content, text, true);
+        }
         // If后端未启用流式，就直接记录历史
         if (!streamed) {
           state.history.push({ role: 'assistant', content: [{ type: 'text', text }] });
         }
       }
     } catch (e) {
-      const el = state.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + String(e);
+      const el = state.lastAssistantEl; if (el) setContent(el.querySelector('.content'), '错误：' + String(e), false);
     }
   }
 
@@ -113,8 +138,13 @@
 
   // Wire UI
   sendBtn.addEventListener('click', send);
+  // IME-friendly Enter handling in textarea
+  let isComposing = false;
+  inputEl.addEventListener('compositionstart', () => { isComposing = true; });
+  inputEl.addEventListener('compositionend', () => { isComposing = false; });
   inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    const composing = isComposing || e.isComposing === true || e.keyCode === 229;
+    if (e.key === 'Enter' && !e.shiftKey && !composing) { e.preventDefault(); send(); }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
   });
   // Hidden file input for attachments
@@ -174,8 +204,18 @@
     }
     if (msg?.type === 'AI_STREAM_DONE') {
       if (!state.pendingRequestId || msg.requestId !== state.pendingRequestId) return;
-      if (!msg.ok) { const el = state.lastAssistantEl; if (el) el.querySelector('.content').textContent = '错误：' + (msg.error || '未知错误'); }
-      else { const el = state.lastAssistantEl; if (el) el.querySelector('.content').textContent = msg.text || '(无内容)'; state.history.push({ role: 'assistant', content: [{ type: 'text', text: msg.text || '' }] }); }
+      if (!msg.ok) {
+        const el = state.lastAssistantEl; if (el) setContent(el.querySelector('.content'), '错误：' + (msg.error || '未知错误'), false);
+        state.lastAssistantRaw = '';
+      } else {
+        const el = state.lastAssistantEl;
+        if (el) {
+          const finalText = msg.text || '(无内容)';
+          state.lastAssistantRaw = msg.text || '';
+          setContent(el.querySelector('.content'), finalText, true);
+        }
+        state.history.push({ role: 'assistant', content: [{ type: 'text', text: msg.text || '' }] });
+      }
       state.pendingRequestId = null;
       state.receivedStream = false;
       return;

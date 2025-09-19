@@ -60,11 +60,22 @@ const PRESETS = {
   }
 };
 
+const DEFAULT_PROMPT_SETS = [
+  {
+    id: 'default',
+    name: '默认提示',
+    userPrompt: '请解读图中的内容，或者解答图中问题。',
+    systemPrompt: '你是一名截图内容解读助手，请使用用户所用语言，简洁描述图中的关键信息与明显的要点，或解答图中提出的问题。'
+  }
+];
+
 const DEFAULT_SETTINGS = {
   activePreset: 'google',
   presetConfigs: Object.fromEntries(Object.entries(PRESETS).map(([id, info]) => [id, { ...info.defaults }])),
-  userPrompt: '请解读图中的内容，或者解答图中问题。',
-  systemPrompt: '你是一名截图内容解读助手，请使用用户所用语言，简洁描述图中的关键信息与明显的要点，或解答图中提出的问题。',
+  promptSets: structuredClone(DEFAULT_PROMPT_SETS),
+  activePromptId: DEFAULT_PROMPT_SETS[0].id,
+  userPrompt: DEFAULT_PROMPT_SETS[0].userPrompt,
+  systemPrompt: DEFAULT_PROMPT_SETS[0].systemPrompt,
   streamEnabled: true
 };
 
@@ -77,6 +88,7 @@ const state = {
   settings: structuredClone(DEFAULT_SETTINGS),
   apiKeys: { ...DEFAULT_API_KEYS },
   currentPreset: DEFAULT_SETTINGS.activePreset,
+  currentPromptId: DEFAULT_SETTINGS.activePromptId,
   els: null
 };
 
@@ -92,9 +104,10 @@ function queueSave() {
   return saveQueue;
 }
 
-function scheduleAutoSave({ memorizePreset = false, memorizeGeneral = false } = {}) {
+function scheduleAutoSave({ memorizePreset = false, memorizeGeneral = false, memorizePrompts = false } = {}) {
   if (memorizePreset) memorizeCurrentPreset();
   if (memorizeGeneral) memorizeGeneralFields();
+  if (memorizePrompts) memorizePromptFields();
   if (autoSaveTimer) clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(() => {
     autoSaveTimer = null;
@@ -102,9 +115,10 @@ function scheduleAutoSave({ memorizePreset = false, memorizeGeneral = false } = 
   }, 400);
 }
 
-async function flushAutoSave({ memorizePreset = false, memorizeGeneral = false } = {}) {
+async function flushAutoSave({ memorizePreset = false, memorizeGeneral = false, memorizePrompts = false } = {}) {
   if (memorizePreset) memorizeCurrentPreset();
   if (memorizeGeneral) memorizeGeneralFields();
+  if (memorizePrompts) memorizePromptFields();
   if (autoSaveTimer) {
     clearTimeout(autoSaveTimer);
     autoSaveTimer = null;
@@ -130,6 +144,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     maxTokens: document.getElementById('maxTokens'),
     userPrompt: document.getElementById('userPrompt'),
     systemPrompt: document.getElementById('systemPrompt'),
+    promptSelect: document.getElementById('promptSelect'),
+    promptAdd: document.getElementById('promptAdd'),
+    promptRename: document.getElementById('promptRename'),
+    promptDelete: document.getElementById('promptDelete'),
     reset: document.getElementById('reset'),
     resetAll: document.getElementById('resetAll'),
     testChannel: document.getElementById('testChannel')
@@ -142,6 +160,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   state.settings = loaded.settings;
   state.apiKeys = loaded.apiKeys;
   state.currentPreset = state.settings.activePreset;
+  state.currentPromptId = state.settings.activePromptId;
 
   els.apiPreset.value = state.currentPreset;
   renderGeneralFields();
@@ -165,6 +184,10 @@ function bindUiEvents() {
     streamEnabled,
     userPrompt,
     systemPrompt,
+    promptSelect,
+    promptAdd,
+    promptRename,
+    promptDelete,
     reset,
     resetAll,
     testChannel
@@ -213,11 +236,68 @@ function bindUiEvents() {
   });
 
   userPrompt?.addEventListener('input', () => {
-    scheduleAutoSave({ memorizeGeneral: true });
+    memorizePromptFields();
+    scheduleAutoSave();
   });
 
   systemPrompt?.addEventListener('input', () => {
-    scheduleAutoSave({ memorizeGeneral: true });
+    memorizePromptFields();
+    scheduleAutoSave();
+  });
+
+  promptSelect?.addEventListener('change', () => {
+    memorizePromptFields();
+    state.currentPromptId = promptSelect.value;
+    state.settings.activePromptId = state.currentPromptId;
+    syncPromptCompatibilityFields();
+    renderPromptFields();
+    scheduleAutoSave({ memorizePrompts: true });
+  });
+
+  promptAdd?.addEventListener('click', (e) => {
+    e.preventDefault();
+    memorizePromptFields();
+    const next = createNewPrompt();
+    state.settings.promptSets.push(next);
+    state.currentPromptId = next.id;
+    state.settings.activePromptId = next.id;
+    syncPromptCompatibilityFields();
+    renderPromptFields();
+    scheduleAutoSave({ memorizePrompts: true });
+  });
+
+  promptRename?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const active = ensureActivePrompt();
+    if (!active) return;
+    const input = window.prompt('请输入新的提示词名称：', active.name || '');
+    if (input === null) return;
+    const trimmed = sanitizePromptName(input, getPromptIndex(active.id));
+    active.name = trimmed;
+    renderPromptFields();
+    scheduleAutoSave({ memorizePrompts: true });
+  });
+
+  promptDelete?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const prompts = state.settings.promptSets || [];
+    if (prompts.length <= 1) {
+      alert('至少需要保留一条提示词。');
+      return;
+    }
+    const active = ensureActivePrompt();
+    if (!active) return;
+    const ok = window.confirm(`确定要删除提示词“${active.name}”吗？`);
+    if (!ok) return;
+    state.settings.promptSets = prompts.filter((item) => item.id !== active.id);
+    if (!state.settings.promptSets.length) {
+      state.settings.promptSets = structuredClone(DEFAULT_PROMPT_SETS);
+    }
+    state.currentPromptId = state.settings.promptSets[0].id;
+    state.settings.activePromptId = state.currentPromptId;
+    syncPromptCompatibilityFields();
+    renderPromptFields();
+    scheduleAutoSave({ memorizePrompts: true });
   });
 
   googleKeyBtn?.addEventListener('click', (e) => {
@@ -260,6 +340,7 @@ function bindUiEvents() {
     state.settings = structuredClone(DEFAULT_SETTINGS);
     state.apiKeys = { ...DEFAULT_API_KEYS };
     state.currentPreset = state.settings.activePreset;
+    state.currentPromptId = state.settings.activePromptId;
     renderGeneralFields();
     renderPresetFields(state.currentPreset);
     state.els.apiPreset.value = state.currentPreset;
@@ -282,10 +363,16 @@ async function loadState() {
 }
 
 function normalizeSettings(raw) {
+  const defaults = structuredClone(DEFAULT_SETTINGS);
   const settings = structuredClone(DEFAULT_SETTINGS);
-  if (typeof raw.userPrompt === 'string') settings.userPrompt = raw.userPrompt;
-  if (typeof raw.systemPrompt === 'string') settings.systemPrompt = raw.systemPrompt;
-  if (typeof raw.streamEnabled === 'boolean') settings.streamEnabled = raw.streamEnabled;
+
+  settings.streamEnabled = typeof raw.streamEnabled === 'boolean' ? raw.streamEnabled : defaults.streamEnabled;
+
+  const promptState = coercePromptState(raw, defaults);
+  settings.promptSets = promptState.promptSets;
+  settings.activePromptId = promptState.activePromptId;
+  settings.userPrompt = promptState.activePrompt.userPrompt;
+  settings.systemPrompt = promptState.activePrompt.systemPrompt;
 
   if (raw.presetConfigs && typeof raw.presetConfigs === 'object') {
     for (const [id, info] of Object.entries(PRESETS)) {
@@ -322,10 +409,117 @@ function normalizeSettings(raw) {
 }
 
 function renderGeneralFields() {
-  const { streamEnabled, userPrompt, systemPrompt } = state.els;
-  streamEnabled.checked = state.settings.streamEnabled !== false;
-  userPrompt.value = state.settings.userPrompt || '';
-  systemPrompt.value = state.settings.systemPrompt || '';
+  const { streamEnabled } = state.els;
+  if (streamEnabled) {
+    streamEnabled.checked = state.settings.streamEnabled !== false;
+  }
+  renderPromptFields();
+}
+
+function renderPromptFields() {
+  const prompts = ensurePromptList();
+  if (!prompts.length) {
+    state.settings.promptSets = structuredClone(DEFAULT_PROMPT_SETS);
+    state.currentPromptId = DEFAULT_PROMPT_SETS[0].id;
+  }
+  const list = ensurePromptList();
+  if (!list.some((item) => item.id === state.currentPromptId)) {
+    state.currentPromptId = list[0]?.id || DEFAULT_PROMPT_SETS[0].id;
+    state.settings.activePromptId = state.currentPromptId;
+  }
+  const { promptSelect, userPrompt, systemPrompt, promptDelete, promptRename } = state.els || {};
+  if (promptSelect) {
+    promptSelect.innerHTML = '';
+    for (const prompt of list) {
+      const opt = document.createElement('option');
+      opt.value = prompt.id;
+      opt.textContent = prompt.name || '未命名提示';
+      promptSelect.appendChild(opt);
+    }
+    promptSelect.value = state.currentPromptId;
+  }
+  const active = ensureActivePrompt();
+  if (userPrompt) {
+    userPrompt.value = active.userPrompt || '';
+  }
+  if (systemPrompt) {
+    systemPrompt.value = active.systemPrompt || '';
+  }
+  if (promptDelete) {
+    promptDelete.disabled = list.length <= 1;
+  }
+  if (promptRename) {
+    promptRename.disabled = list.length === 0;
+  }
+  syncPromptCompatibilityFields();
+}
+
+function ensurePromptList() {
+  if (!Array.isArray(state.settings.promptSets)) {
+    state.settings.promptSets = structuredClone(DEFAULT_PROMPT_SETS);
+  }
+  if (!state.settings.promptSets.length) {
+    state.settings.promptSets = structuredClone(DEFAULT_PROMPT_SETS);
+  }
+  return state.settings.promptSets;
+}
+
+function ensureActivePrompt() {
+  const list = ensurePromptList();
+  if (!list.length) {
+    const fallback = structuredClone(DEFAULT_PROMPT_SETS[0]);
+    fallback.id = DEFAULT_PROMPT_SETS[0].id;
+    list.push(fallback);
+  }
+  let prompt = list.find((item) => item.id === state.currentPromptId);
+  if (!prompt) {
+    prompt = list[0];
+    state.currentPromptId = prompt.id;
+    state.settings.activePromptId = prompt.id;
+  }
+  return prompt;
+}
+
+function getPromptIndex(promptId) {
+  const list = ensurePromptList();
+  const idx = list.findIndex((item) => item.id === promptId);
+  return idx >= 0 ? idx : 0;
+}
+
+function createNewPrompt() {
+  const list = ensurePromptList();
+  const active = ensureActivePrompt();
+  const id = generatePromptId(new Set(list.map((item) => item.id)));
+  const existingNames = new Set(list.map((item) => item.name));
+  const baseName = '新提示词';
+  let name = baseName;
+  let counter = 2;
+  while (existingNames.has(name)) {
+    name = `${baseName} ${counter++}`;
+  }
+  return {
+    id,
+    name,
+    userPrompt: active ? active.userPrompt : '',
+    systemPrompt: active ? active.systemPrompt : ''
+  };
+}
+
+function syncPromptCompatibilityFields() {
+  const active = ensureActivePrompt();
+  if (!active) return;
+  state.settings.activePromptId = active.id;
+  state.settings.userPrompt = active.userPrompt || '';
+  state.settings.systemPrompt = active.systemPrompt || '';
+}
+
+function memorizePromptFields() {
+  if (!state.els) return;
+  const active = ensureActivePrompt();
+  if (!active) return;
+  active.userPrompt = state.els.userPrompt?.value || '';
+  active.systemPrompt = state.els.systemPrompt?.value || '';
+  syncPromptCompatibilityFields();
 }
 
 function renderPresetFields(preset) {
@@ -456,8 +650,6 @@ function toggleMaxTokensInput() {
 function memorizeGeneralFields() {
   if (!state.els) return;
   state.settings.streamEnabled = !!state.els.streamEnabled.checked;
-  state.settings.userPrompt = state.els.userPrompt.value;
-  state.settings.systemPrompt = state.els.systemPrompt.value;
 }
 
 function memorizeCurrentPreset() {
@@ -485,9 +677,12 @@ function getCurrentModelValue() {
 }
 
 async function persistState() {
+  syncPromptCompatibilityFields();
   const payload = {
     activePreset: state.settings.activePreset,
     presetConfigs: state.settings.presetConfigs,
+    promptSets: state.settings.promptSets,
+    activePromptId: state.settings.activePromptId,
     userPrompt: state.settings.userPrompt,
     systemPrompt: state.settings.systemPrompt,
     streamEnabled: state.settings.streamEnabled
@@ -506,6 +701,7 @@ async function handleTestChannel(button) {
   if (!button) return;
   memorizeCurrentPreset();
   memorizeGeneralFields();
+  memorizePromptFields();
   scheduleAutoSave();
   const presetId = state.currentPreset;
   const apiKey = state.apiKeys[presetId] || '';
@@ -582,4 +778,74 @@ function clampInt(n, min, max) {
   const v = Number.parseInt(n, 10);
   if (!Number.isFinite(v)) return min;
   return Math.min(max, Math.max(min, v));
+}
+
+function coercePromptState(raw, defaults = DEFAULT_SETTINGS) {
+  const fallbackList = Array.isArray(defaults.promptSets) && defaults.promptSets.length
+    ? defaults.promptSets
+    : DEFAULT_PROMPT_SETS;
+  const fallbackPrompt = fallbackList[0] || DEFAULT_PROMPT_SETS[0];
+
+  const sanitized = [];
+  const seenIds = new Set();
+
+  const pushPrompt = (entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    let id = typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : generatePromptId(seenIds);
+    while (seenIds.has(id)) {
+      id = generatePromptId(seenIds);
+    }
+    const name = sanitizePromptName(entry.name, sanitized.length);
+    const systemPrompt = typeof entry.systemPrompt === 'string' ? entry.systemPrompt : '';
+    const userPrompt = typeof entry.userPrompt === 'string' ? entry.userPrompt : '';
+    sanitized.push({ id, name, systemPrompt, userPrompt });
+    seenIds.add(id);
+  };
+
+  if (Array.isArray(raw.promptSets) && raw.promptSets.length) {
+    for (const entry of raw.promptSets) {
+      pushPrompt(entry);
+    }
+  }
+
+  if (!sanitized.length) {
+    pushPrompt({
+      id: fallbackPrompt.id,
+      name: fallbackPrompt.name,
+      systemPrompt: typeof raw.systemPrompt === 'string' ? raw.systemPrompt : fallbackPrompt.systemPrompt,
+      userPrompt: typeof raw.userPrompt === 'string' ? raw.userPrompt : fallbackPrompt.userPrompt
+    });
+  }
+
+  if (!sanitized.length) {
+    pushPrompt(fallbackPrompt);
+  }
+
+  let activePromptId = typeof raw.activePromptId === 'string' && raw.activePromptId.trim()
+    ? raw.activePromptId.trim()
+    : null;
+  if (!activePromptId || !sanitized.some((item) => item.id === activePromptId)) {
+    activePromptId = sanitized[0].id;
+  }
+  const activePrompt = sanitized.find((item) => item.id === activePromptId) || sanitized[0];
+
+  return {
+    promptSets: sanitized,
+    activePromptId,
+    activePrompt
+  };
+}
+
+function sanitizePromptName(nameRaw, index = 0) {
+  const trimmed = typeof nameRaw === 'string' ? nameRaw.trim() : '';
+  if (trimmed) return trimmed.slice(0, 60);
+  return `提示词 ${index + 1}`;
+}
+
+function generatePromptId(existingSet = new Set()) {
+  let candidate;
+  do {
+    candidate = `prompt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  } while (existingSet.has(candidate));
+  return candidate;
 }
